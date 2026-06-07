@@ -1,302 +1,157 @@
-import Papa from 'papaparse';
-import * as XLSX from 'xlsx';
-import type { ColumnStats } from './types';
+import { useState } from 'react';
+import { Wand2, CheckCircle2, AlertTriangle, Loader2, RotateCcw, Download } from 'lucide-react';
+import { applyCleaningRules } from '../../lib/data-processing';
+import type { CleaningRule } from '../../lib/types';
 
-export interface ParsedData {
+interface Props {
   columns: string[];
   rows: Record<string, unknown>[];
-  rowCount: number;
-  columnCount: number;
+  onCleaned: (rows: Record<string, unknown>[], changes: string[]) => void;
 }
 
-// Section 1.4 & 1.5 fixes: sample stddev, safe min/max
-function computeStatistics(columns: string[], rows: Record<string, unknown>[]): Record<string, ColumnStats> {
-  // Section 1.10: prototype pollution protection
-  const safeColumns = columns.filter(
-    c => c !== '__proto__' && c !== 'constructor' && c !== 'prototype'
+function defaultRules(columns: string[]): CleaningRule[] {
+  const rules: CleaningRule[] = [
+    { id: 'dup', type: 'remove_duplicates', enabled: true, label: 'Remove duplicate rows' },
+    { id: 'ws', type: 'trim_whitespace', enabled: true, label: 'Trim whitespace in text columns' },
+  ];
+  for (const col of columns.slice(0, 6)) {
+    rules.push({ id: `null_${col}`, type: 'remove_nulls', column: col, enabled: false, label: `Remove rows where "${col}" is null` });
+    rules.push({ id: `mean_${col}`, type: 'fill_mean', column: col, enabled: false, label: `Fill nulls in "${col}" with mean` });
+  }
+  return rules;
+}
+
+export default function CleanTab({ columns, rows, onCleaned }: Props) {
+  const [rules, setRules] = useState<CleaningRule[]>(() => defaultRules(columns));
+  const [applied, setApplied] = useState(false);
+  const [changes, setChanges] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [cleanedRows, setCleanedRows] = useState<Record<string, unknown>[] | null>(null);
+
+  function toggleRule(id: string) {
+    setRules(prev => prev.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r));
+  }
+
+  async function handleApply() {
+    setLoading(true);
+    await new Promise(r => setTimeout(r, 0));
+    const enabledRules = rules.filter(r => r.enabled);
+    const { rows: cleaned, changes: log } = applyCleaningRules(rows, columns, enabledRules);
+    setChanges(log);
+    setApplied(true);
+    setLoading(false);
+    setCleanedRows(cleaned);
+    onCleaned(cleaned, log);
+  }
+
+  function handleReset() {
+    setRules(defaultRules(columns));
+    setApplied(false);
+    setChanges([]);
+    setCleanedRows(null);
+    onCleaned(rows, []);
+  }
+
+  function handleExport() {
+    const data = cleanedRows ?? rows;
+    const header = columns.join(',');
+    const body = data.map(row =>
+      columns.map(col => {
+        const val = row[col] ?? '';
+        return typeof val === 'string' && val.includes(',') ? `"${val}"` : val;
+      }).join(',')
+    ).join('\n');
+    const blob = new Blob([header + '\n' + body], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'cleaned_data.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  const enabledCount = rules.filter(r => r.enabled).length;
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-200">Cleaning Rules</h3>
+          <p className="text-slate-500 text-xs mt-0.5">{enabledCount} rule{enabledCount !== 1 ? 's' : ''} selected</p>
+        </div>
+        <div className="flex gap-2">
+          {applied && (
+            <button
+              onClick={handleReset}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm transition"
+            >
+              <RotateCcw className="w-4 h-4" /> Reset
+            </button>
+          )}
+          {applied && (
+            <button
+              onClick={handleExport}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition"
+            >
+              <Download className="w-4 h-4" /> Export Cleaned CSV
+            </button>
+          )}
+          <button
+            onClick={handleApply}
+            disabled={loading || enabledCount === 0}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition"
+          >
+            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+            Apply Rules
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        {rules.map(rule => (
+          <label
+            key={rule.id}
+            className={`flex items-center gap-3 p-4 rounded-xl border cursor-pointer transition-all ${rule.enabled ? 'bg-blue-500/10 border-blue-500/30' : 'bg-slate-800/40 border-slate-700/50 hover:border-slate-600'}`}
+          >
+            <input
+              type="checkbox"
+              checked={rule.enabled}
+              onChange={() => toggleRule(rule.id)}
+              className="w-4 h-4 accent-blue-500 rounded"
+            />
+            <div>
+              <p className="text-sm text-slate-200">{rule.label ?? rule.type}</p>
+              {rule.column && (
+                <p className="text-xs text-slate-500 mt-0.5">Column: {rule.column}</p>
+              )}
+            </div>
+          </label>
+        ))}
+      </div>
+
+      {applied && changes.length > 0 && (
+        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+            <span className="text-sm font-semibold text-emerald-400">Cleaning Applied</span>
+          </div>
+          <ul className="space-y-1">
+            {changes.map((c, i) => (
+              <li key={i} className="text-sm text-slate-300 flex items-start gap-2">
+                <span className="text-emerald-500 mt-0.5">•</span>
+                {c}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {applied && changes.length === 0 && (
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4 flex items-center gap-3 text-slate-400 text-sm">
+          <AlertTriangle className="w-4 h-4" />
+          No changes were made — data may already be clean.
+        </div>
+      )}
+    </div>
   );
-
-  const stats: Record<string, ColumnStats> = {};
-
-  for (const col of safeColumns) {
-    const vals = rows.map(r => r[col]);
-    const nullCount = vals.filter(v => v === null || v === undefined || v === '').length;
-    const nonNull = vals.filter(v => v !== null && v !== undefined && v !== '');
-    const uniqueCount = new Set(nonNull.map(String)).size;
-
-    const nums = nonNull
-      .map(v => Number(v))
-      .filter(n => !isNaN(n));
-
-    const colStat: ColumnStats = {
-      count: rows.length,
-      nullCount,
-      uniqueCount,
-    };
-
-    if (nums.length > 0) {
-      const sum = nums.reduce((a, b) => a + b, 0);
-      const mean = sum / nums.length;
-      colStat.mean = parseFloat(mean.toFixed(4));
-
-      // Section 1.4: sample std dev (n-1)
-      if (nums.length >= 2) {
-        const variance =
-          nums.reduce((acc, n) => acc + Math.pow(n - mean, 2), 0) /
-          (nums.length - 1);
-        colStat.stdDev = parseFloat(Math.sqrt(variance).toFixed(4));
-      } else {
-        colStat.stdDev = 0;
-      }
-
-      // Section 1.5: safe min/max (no spread operator crash)
-      colStat.min = nums.reduce((a, b) => (a < b ? a : b));
-      colStat.max = nums.reduce((a, b) => (a > b ? a : b));
-
-      const sorted = [...nums].sort((a, b) => a - b);
-      const mid = Math.floor(sorted.length / 2);
-      colStat.median =
-        sorted.length % 2 === 0
-          ? (sorted[mid - 1] + sorted[mid]) / 2
-          : sorted[mid];
-
-      // mode
-      const freq: Record<number, number> = {};
-      for (const n of nums) freq[n] = (freq[n] ?? 0) + 1;
-      colStat.mode = Number(
-        Object.entries(freq).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 0
-      );
-    } else {
-      // string column
-      const strVals = nonNull.map(String);
-      if (strVals.length > 0) {
-        colStat.min = strVals.reduce((a, b) => (a < b ? a : b));
-        colStat.max = strVals.reduce((a, b) => (a > b ? a : b));
-      }
-    }
-
-    stats[col] = colStat;
-  }
-
-  return stats;
-}
-
-function calcQualityScore(
-  rows: Record<string, unknown>[],
-  stats: Record<string, ColumnStats>
-): number {
-  if (rows.length === 0) return 0;
-  const cols = Object.keys(stats);
-  const totalCells = rows.length * cols.length;
-  if (totalCells === 0) return 100;
-
-  const totalNull = cols.reduce((sum, c) => sum + (stats[c]?.nullCount ?? 0), 0);
-  const nullRatio = totalNull / totalCells;
-
-  const uniqueCounts = rows.map(r => JSON.stringify(r));
-  const duplicates = uniqueCounts.length - new Set(uniqueCounts).size;
-  const dupRatio = duplicates / rows.length;
-
-  const score = 100 - nullRatio * 50 - dupRatio * 30;
-  return Math.max(0, Math.min(100, Math.round(score)));
-}
-
-export async function parseFile(file: File): Promise<ParsedData> {
-  const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
-
-  // Section 5: magic byte validation
-  const buf = await file.arrayBuffer();
-  const bytes = new Uint8Array(buf).slice(0, 8);
-
-  function matchesMagic(magic: number[]): boolean {
-    return magic.every((b, i) => bytes[i] === b);
-  }
-
-  const allowedTypes = ['xlsx', 'xls', 'csv'];
-  if (!allowedTypes.includes(ext)) {
-    throw new Error(`Unsupported file type: .${ext}. Please upload Excel (.xlsx, .xls) or CSV files.`);
-  }
-
-  if (ext !== 'csv') {
-    const isXlsx = matchesMagic([0x50, 0x4b, 0x03, 0x04]);
-    const isXls = matchesMagic([0xd0, 0xcf, 0x11, 0xe0]);
-    if (ext === 'xlsx' && !isXlsx) {
-      throw new Error('File content does not match the declared file type (.xlsx).');
-    }
-    if (ext === 'xls' && !isXls) {
-      throw new Error('File content does not match the declared file type (.xls).');
-    }
-  }
-
-  let columns: string[] = [];
-  let rows: Record<string, unknown>[] = [];
-
-  if (ext === 'csv') {
-    const text = new TextDecoder().decode(buf);
-    const result = Papa.parse<Record<string, unknown>>(text, {
-      header: true,
-      skipEmptyLines: true,
-      dynamicTyping: true,
-    });
-    columns = result.meta.fields ?? [];
-    rows = result.data;
-  } else if (ext === 'xlsx' || ext === 'xls') {
-    const wb = XLSX.read(buf, { type: 'array' });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const data = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: null });
-    rows = data;
-    columns = data.length > 0 ? Object.keys(data[0]) : [];
-  }
-
-  // Remove __proto__, constructor, prototype from column names
-  columns = columns.filter(c => c !== '__proto__' && c !== 'constructor' && c !== 'prototype');
-
-  return {
-    columns,
-    rows,
-    rowCount: rows.length,
-    columnCount: columns.length,
-  };
-}
-
-export function profileData(
-  columns: string[],
-  rows: Record<string, unknown>[]
-): {
-  statistics: Record<string, ColumnStats>;
-  qualityScore: number;
-  missingValues: Record<string, number>;
-  uniqueValues: Record<string, number>;
-  duplicateRows: number;
-} {
-  const statistics = computeStatistics(columns, rows);
-
-  const missingValues: Record<string, number> = {};
-  const uniqueValues: Record<string, number> = {};
-  for (const col of columns) {
-    missingValues[col] = statistics[col]?.nullCount ?? 0;
-    uniqueValues[col] = statistics[col]?.uniqueCount ?? 0;
-  }
-
-  const uniqueRowStrs = new Set(rows.map(r => JSON.stringify(r)));
-  const duplicateRows = rows.length - uniqueRowStrs.size;
-
-  const qualityScore = calcQualityScore(rows, statistics);
-
-  return { statistics, qualityScore, missingValues, uniqueValues, duplicateRows };
-}
-
-export function applyCleaningRules(
-  rows: Record<string, unknown>[],
-  columns: string[],
-  rules: Array<{ type: string; column?: string; value?: unknown; enabled: boolean }>
-): { rows: Record<string, unknown>[]; changes: string[] } {
-  let result = [...rows];
-  const changes: string[] = [];
-
-  for (const rule of rules) {
-    if (!rule.enabled) continue;
-
-    switch (rule.type) {
-      case 'remove_duplicates': {
-        const before = result.length;
-        const seen = new Set<string>();
-        result = result.filter(r => {
-          const key = JSON.stringify(r);
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-        changes.push(`Removed ${before - result.length} duplicate rows`);
-        break;
-      }
-      case 'remove_nulls': {
-        const col = rule.column;
-        if (col) {
-          const before = result.length;
-          result = result.filter(
-            r => r[col] !== null && r[col] !== undefined && r[col] !== ''
-          );
-          changes.push(`Removed ${before - result.length} rows with null in "${col}"`);
-        }
-        break;
-      }
-      case 'fill_mean': {
-        const col = rule.column;
-        if (col) {
-          const nums = result
-            .map(r => Number(r[col]))
-            .filter(n => !isNaN(n));
-          if (nums.length > 0) {
-            const mean = nums.reduce((a, b) => a + b, 0) / nums.length;
-            let filled = 0;
-            result = result.map(r => {
-              if (r[col] === null || r[col] === undefined || r[col] === '') {
-                filled++;
-                return { ...r, [col]: parseFloat(mean.toFixed(4)) };
-              }
-              return r;
-            });
-            changes.push(`Filled ${filled} null values in "${col}" with mean (${mean.toFixed(2)})`);
-          }
-        }
-        break;
-      }
-      case 'fill_median': {
-        const col = rule.column;
-        if (col) {
-          const nums = result
-            .map(r => Number(r[col]))
-            .filter(n => !isNaN(n))
-            .sort((a, b) => a - b);
-          if (nums.length > 0) {
-            const mid = Math.floor(nums.length / 2);
-            const median =
-              nums.length % 2 === 0 ? (nums[mid - 1] + nums[mid]) / 2 : nums[mid];
-            let filled = 0;
-            result = result.map(r => {
-              if (r[col] === null || r[col] === undefined || r[col] === '') {
-                filled++;
-                return { ...r, [col]: median };
-              }
-              return r;
-            });
-            changes.push(`Filled ${filled} null values in "${col}" with median (${median})`);
-          }
-        }
-        break;
-      }
-      case 'trim_whitespace': {
-        let trimmed = 0;
-        result = result.map(r => {
-          const newRow = { ...r };
-          for (const col of columns) {
-            if (typeof newRow[col] === 'string') {
-              const trimmed2 = (newRow[col] as string).trim();
-              if (trimmed2 !== newRow[col]) {
-                newRow[col] = trimmed2;
-                trimmed++;
-              }
-            }
-          }
-          return newRow;
-        });
-        if (trimmed > 0) changes.push(`Trimmed whitespace in ${trimmed} cells`);
-        break;
-      }
-      case 'standardize_case': {
-        const col = rule.column;
-        if (col) {
-          result = result.map(r => ({
-            ...r,
-            [col]: typeof r[col] === 'string' ? (r[col] as string).toLowerCase() : r[col],
-          }));
-          changes.push(`Standardized case in "${col}" to lowercase`);
-        }
-        break;
-      }
-    }
-  }
-
-  return { rows: result, changes };
 }
