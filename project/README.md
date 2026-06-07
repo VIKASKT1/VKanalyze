@@ -2,7 +2,7 @@
 
 Upload any CSV or Excel file and get instant AI-powered analysis, beautiful charts, data cleaning tools, and PDF reports — all running in your browser.
 
-**Live Demo:** [Add your URL after deployment]
+**Live Demo:** https://v-kanalyze.vercel.app/
 
 ## Features
 
