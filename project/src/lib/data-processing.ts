@@ -127,6 +127,9 @@ export function applyCleaningRules(
 ): { rows: Record<string, unknown>[]; changes: string[] } {
   let result = [...rows];
   const changes: string[] = [];
+
+  const toNum = (v: unknown): number => parseFloat(String(v).replace(/[^0-9.-]/g, ''));
+
   for (const rule of rules) {
     if (!rule.enabled) continue;
     switch (rule.type) {
@@ -155,19 +158,24 @@ export function applyCleaningRules(
         const col = rule.column;
         if (col) {
           const allVals = result.map(r => r[col]).filter(v => v !== null && v !== undefined && v !== '');
-          const isNumericCol = allVals.every(v => !isNaN(Number(v)));
+          const numericVals = allVals.map(toNum).filter(n => !isNaN(n) && n >= 0);
+          const isNumericCol = numericVals.length / allVals.length > 0.5;
           if (!isNumericCol) {
             changes.push(`Skipped "${col}" — not a numeric column`);
             break;
           }
-          const nums = allVals.map(v => Number(v));
-          const mean = nums.reduce((a, b) => a + b, 0) / nums.length;
+          const mean = numericVals.reduce((a, b) => a + b, 0) / numericVals.length;
           const roundedMean = Number.isInteger(mean) ? mean : parseFloat(mean.toFixed(2));
           let filled = 0;
           result = result.map(r => {
             if (r[col] === null || r[col] === undefined || r[col] === '') {
               filled++;
               return { ...r, [col]: roundedMean };
+            }
+            // Also clean currency symbols from existing values
+            if (typeof r[col] === 'string' && isNaN(Number(r[col]))) {
+              const cleaned = toNum(r[col]);
+              return { ...r, [col]: isNaN(cleaned) ? r[col] : cleaned };
             }
             return r;
           });
@@ -179,19 +187,24 @@ export function applyCleaningRules(
         const col = rule.column;
         if (col) {
           const allVals = result.map(r => r[col]).filter(v => v !== null && v !== undefined && v !== '');
-          const isNumericCol = allVals.every(v => !isNaN(Number(v)));
+          const numericVals = allVals.map(toNum).filter(n => !isNaN(n) && n >= 0);
+          const isNumericCol = numericVals.length / allVals.length > 0.5;
           if (!isNumericCol) {
             changes.push(`Skipped "${col}" — not a numeric column`);
             break;
           }
-          const nums = allVals.map(v => Number(v)).sort((a, b) => a - b);
-          const mid = Math.floor(nums.length / 2);
-          const median = nums.length % 2 === 0 ? (nums[mid - 1] + nums[mid]) / 2 : nums[mid];
+          const sorted = [...numericVals].sort((a, b) => a - b);
+          const mid = Math.floor(sorted.length / 2);
+          const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
           let filled = 0;
           result = result.map(r => {
             if (r[col] === null || r[col] === undefined || r[col] === '') {
               filled++;
               return { ...r, [col]: median };
+            }
+            if (typeof r[col] === 'string' && isNaN(Number(r[col]))) {
+              const cleaned = toNum(r[col]);
+              return { ...r, [col]: isNaN(cleaned) ? r[col] : cleaned };
             }
             return r;
           });
