@@ -45,11 +45,23 @@ export default function CleanTab({ columns, rows, onCleaned }: Props) {
     onCleaned(cleaned, log);
   }
 
-  function handleReset() {
-    setRules(defaultRules(columns));
-    setApplied(false);
-    setChanges([]);
-    onCleaned(rows, []);
+  function handleExport() {
+    const enabledRules = rules.filter(r => r.enabled);
+    const { rows: cleaned } = applyCleaningRules(rows, columns, enabledRules);
+    const header = columns.join(',');
+    const body = cleaned.map(row =>
+      columns.map(col => {
+        const val = row[col] ?? '';
+        return typeof val === 'string' && val.includes(',') ? `"${val}"` : val;
+      }).join(',')
+    ).join('\n');
+    const blob = new Blob([header + '\n' + body], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'cleaned_data.csv';
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   const enabledCount = rules.filter(r => r.enabled).length;
