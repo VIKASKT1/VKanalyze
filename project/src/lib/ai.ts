@@ -200,6 +200,109 @@ export async function chatWithData(
       }
       return `${col.name} (text): ${s.uniqueCount} unique values, ${s.nullCount} nulls`;
     }).join('\n');
+const lowerQuestion = question.toLowerCase();
+
+// Count records containing a specific number
+const numberMatch = question.match(/\d+/);
+
+if (
+  lowerQuestion.includes('how many') &&
+  numberMatch
+) {
+  const target = numberMatch[0];
+
+  const count = rows.filter(row =>
+    Object.values(row).some(
+      value => String(value).trim() === target
+    )
+  ).length;
+
+  return `There are ${count} records containing the value ${target}.`;
+}
+
+// Total / Sum
+if (
+  lowerQuestion.includes('total') ||
+  lowerQuestion.includes('sum')
+) {
+  const numericColumn = columns.find(
+    c => c.type === 'number'
+  );
+
+  if (numericColumn) {
+    const total = rows.reduce(
+      (sum, row) =>
+        sum + Number(row[numericColumn.name] || 0),
+      0
+    );
+
+    return `Total ${numericColumn.name}: ${total.toLocaleString()}`;
+  }
+}
+
+// Average
+if (
+  lowerQuestion.includes('average') ||
+  lowerQuestion.includes('mean')
+) {
+  const numericColumn = columns.find(
+    c => c.type === 'number'
+  );
+
+  if (numericColumn) {
+    const total = rows.reduce(
+      (sum, row) =>
+        sum + Number(row[numericColumn.name] || 0),
+      0
+    );
+
+    const avg = total / rows.length;
+
+    return `Average ${numericColumn.name}: ${avg.toFixed(2)}`;
+  }
+}
+
+// Maximum
+if (
+  lowerQuestion.includes('highest') ||
+  lowerQuestion.includes('maximum') ||
+  lowerQuestion.includes('max')
+) {
+  const numericColumn = columns.find(
+    c => c.type === 'number'
+  );
+
+  if (numericColumn) {
+    const max = Math.max(
+      ...rows.map(r =>
+        Number(r[numericColumn.name] || 0)
+      )
+    );
+
+    return `Highest ${numericColumn.name}: ${max}`;
+  }
+}
+
+// Minimum
+if (
+  lowerQuestion.includes('lowest') ||
+  lowerQuestion.includes('minimum') ||
+  lowerQuestion.includes('min')
+) {
+  const numericColumn = columns.find(
+    c => c.type === 'number'
+  );
+
+  if (numericColumn) {
+    const min = Math.min(
+      ...rows.map(r =>
+        Number(r[numericColumn.name] || 0)
+      )
+    );
+
+    return `Lowest ${numericColumn.name}: ${min}`;
+  }
+}
 
     const prompt = `You are a data analyst assistant for the dataset "${datasetName}".
 
