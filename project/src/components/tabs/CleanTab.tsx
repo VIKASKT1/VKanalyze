@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react';
-import { Wand2, CheckCircle2, AlertTriangle, Loader2, RotateCcw } from 'lucide-react';
+import { useState } from 'react';
+import { Wand2, CheckCircle2, AlertTriangle, Loader2, RotateCcw, Download } from 'lucide-react';
 import { applyCleaningRules } from '../../lib/data-processing';
 import type { CleaningRule } from '../../lib/types';
 
@@ -8,8 +8,6 @@ interface Props {
   rows: Record<string, unknown>[];
   onCleaned: (rows: Record<string, unknown>[], changes: string[]) => void;
 }
-
-const nullableRuleTypes = ['remove_nulls', 'fill_mean', 'fill_median', 'standardize_case'];
 
 function defaultRules(columns: string[]): CleaningRule[] {
   const rules: CleaningRule[] = [
@@ -35,7 +33,6 @@ export default function CleanTab({ columns, rows, onCleaned }: Props) {
 
   async function handleApply() {
     setLoading(true);
-    // Yield to browser for render
     await new Promise(r => setTimeout(r, 0));
     const enabledRules = rules.filter(r => r.enabled);
     const { rows: cleaned, changes: log } = applyCleaningRules(rows, columns, enabledRules);
@@ -43,6 +40,13 @@ export default function CleanTab({ columns, rows, onCleaned }: Props) {
     setApplied(true);
     setLoading(false);
     onCleaned(cleaned, log);
+  }
+
+  function handleReset() {
+    setRules(defaultRules(columns));
+    setApplied(false);
+    setChanges([]);
+    onCleaned(rows, []);
   }
 
   function handleExport() {
@@ -82,6 +86,14 @@ export default function CleanTab({ columns, rows, onCleaned }: Props) {
               <RotateCcw className="w-4 h-4" /> Reset
             </button>
           )}
+          {applied && (
+            <button
+              onClick={handleExport}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition"
+            >
+              <Download className="w-4 h-4" /> Export Cleaned CSV
+            </button>
+          )}
           <button
             onClick={handleApply}
             disabled={loading || enabledCount === 0}
@@ -93,7 +105,6 @@ export default function CleanTab({ columns, rows, onCleaned }: Props) {
         </div>
       </div>
 
-      {/* Rules list */}
       <div className="space-y-2">
         {rules.map(rule => (
           <label
@@ -116,7 +127,6 @@ export default function CleanTab({ columns, rows, onCleaned }: Props) {
         ))}
       </div>
 
-      {/* Changes log */}
       {applied && changes.length > 0 && (
         <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4">
           <div className="flex items-center gap-2 mb-3">
