@@ -1,4 +1,3 @@
-import { supabase } from './supabase';
 import type { ColumnStats } from './types';
 
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`;
@@ -12,7 +11,7 @@ async function callGemini(prompt: string): Promise<string> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+      generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
     }),
   });
 
@@ -29,24 +28,24 @@ function buildContext(
   qualityScore: number,
   rows: Record<string, unknown>[] = []
 ): string {
-  const colStats = columns.slice(0, 20).map(col => {
+  const colStats = columns.slice(0, 15).map(col => {
     const s = statistics[col.name];
     if (!s) return `${col.name} (${col.type})`;
     if (col.type === 'number') {
-      return `${col.name}: min=${s.min}, max=${s.max}, mean=${s.mean?.toFixed(2)}, median=${s.median}, stdDev=${s.stdDev}, nulls=${s.nullCount}`;
+      return `${col.name}: min=${s.min}, max=${s.max}, mean=${s.mean?.toFixed(2)}, nulls=${s.nullCount}`;
     }
-    return `${col.name} (text): ${s.uniqueCount} unique values, ${s.nullCount} nulls`;
+    return `${col.name} (text): ${s.uniqueCount} unique, ${s.nullCount} nulls`;
   }).join('\n');
 
-  const sample = rows.slice(0, 20);
+  const sample = rows.slice(0, 5);
 
   return `Dataset: "${datasetName}"
-Rows: ${rowCount.toLocaleString()} | Columns: ${columns.length} | Quality Score: ${qualityScore}/100
+Rows: ${rowCount.toLocaleString()} | Columns: ${columns.length} | Quality: ${qualityScore}/100
 
 COLUMN STATISTICS:
 ${colStats}
 
-SAMPLE DATA (first 20 rows):
+SAMPLE DATA (5 rows):
 ${JSON.stringify(sample, null, 2)}`;
 }
 
@@ -120,7 +119,11 @@ function localFallbackInsights(
   if (textCols.length > 0) recommendations.push(`Group data by ${textCols[0]?.name} to find patterns using a Bar chart.`);
   recommendations.push('Export a PDF report to share findings with stakeholders.');
 
-  return { insights, recommendations, summary: `Dataset analyzed: ${rowCount} rows, ${columns.length} columns, quality score ${qualityScore}/100.` };
+  return {
+    insights,
+    recommendations,
+    summary: `Dataset analyzed: ${rowCount} rows, ${columns.length} columns, quality score ${qualityScore}/100.`,
+  };
 }
 
 export async function generateInsights(
@@ -147,7 +150,7 @@ Return this exact JSON structure:
       "recommendation": "actionable advice"
     }
   ],
-  "recommendations": ["recommendation 1", "recommendation 2", "recommendation 3"],
+  "recommendations": ["rec 1", "rec 2", "rec 3"],
   "summary": "2-3 sentence executive summary with specific findings"
 }
 
@@ -174,32 +177,25 @@ export async function chatWithData(
   try {
     const ctx = buildContext(datasetName, columns, statistics, rowCount, qualityScore, rows);
 
-    const historyStr = history.slice(-8)
+    const historyStr = history.slice(-6)
       .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
       .join('\n');
 
-    const prompt = `You are an expert data analyst assistant. Answer questions accurately using the actual dataset provided below.
+    const prompt = `You are an expert data analyst. Answer using the dataset below.
 
 ${ctx}
 
-CONVERSATION HISTORY:
+RECENT CONVERSATION:
 ${historyStr}
 
 USER QUESTION: ${question}
 
-INSTRUCTIONS:
-- Use the actual data and statistics provided — reference specific numbers and values
-- For calculations (sum, average, max, min, count), compute from the sample data shown
-- If the sample is too small to answer fully, say so and use the statistics provided
-- Be concise, specific, and helpful
-- Format numbers with commas for readability
-- Use bullet points for lists
-- If asked to compare, show a clear comparison with numbers`;
+Answer concisely using actual data and statistics. Use bullet points for lists. Reference specific numbers.`;
 
     const text = await callGemini(prompt);
-    return text || 'I analyzed your dataset but could not generate a response.';
+    return text || 'I could not generate a response. Please try again.';
   } catch {
-    return localFallbackChat(datasetName, columns, statistics, rowCount, question, rows);
+    return localFallbackChat(datasetName, columns, statistics, rowCount, qualityScore, question, rows);
   }
 }
 
@@ -208,44 +204,51 @@ function localFallbackChat(
   columns: Array<{ name: string; type: string }>,
   statistics: Record<string, ColumnStats>,
   rowCount: number,
+  qualityScore: number,
   message: string,
   rows: Record<string, unknown>[] = []
 ): string {
   const lower = message.toLowerCase();
 
+  if (lower.includes('name') && (lower.includes('dataset') || lower.includes('file'))) {
+    return `The dataset name is "${datasetName}".`;
+  }
   if (lower.includes('how many') && lower.includes('row')) {
     return `The dataset "${datasetName}" contains ${rowCount.toLocaleString()} rows.`;
   }
-  if (lower.includes('column')) {
+  if (lower.includes('how many') && lower.includes('column')) {
     return `The dataset has ${columns.length} columns: ${columns.map(c => c.name).join(', ')}.`;
+  }
+  if (lower.includes('quality')) {
+    return `The data quality score is ${qualityScore}/100.`;
   }
   if (lower.includes('null') || lower.includes('missing')) {
     const nullCols = Object.entries(statistics)
       .filter(([, s]) => s.nullCount > 0)
       .map(([col, s]) => `${col}: ${s.nullCount} nulls`);
     if (nullCols.length === 0) return 'No missing values detected in this dataset!';
-    return `Found missing values in ${nullCols.length} column(s): ${nullCols.join(', ')}.`;
+    return `Found missing values in ${nullCols.length} column(s):\n${nullCols.join('\n')}`;
   }
   if (lower.includes('mean') || lower.includes('average')) {
     const numCols = Object.entries(statistics)
       .filter(([, s]) => s.mean !== undefined)
       .slice(0, 5)
       .map(([col, s]) => `${col}: ${s.mean}`);
-    return numCols.length > 0 ? `Column means: ${numCols.join(', ')}` : 'No numeric columns found.';
+    return numCols.length > 0 ? `Column means:\n${numCols.join('\n')}` : 'No numeric columns found.';
   }
   if (lower.includes('max') || lower.includes('maximum') || lower.includes('highest')) {
     const numCols = Object.entries(statistics)
       .filter(([, s]) => s.max !== undefined)
       .slice(0, 5)
       .map(([col, s]) => `${col}: ${s.max}`);
-    return numCols.length > 0 ? `Maximum values: ${numCols.join(', ')}` : 'No numeric columns found.';
+    return numCols.length > 0 ? `Maximum values:\n${numCols.join('\n')}` : 'No numeric columns found.';
   }
   if (lower.includes('min') || lower.includes('minimum') || lower.includes('lowest')) {
     const numCols = Object.entries(statistics)
       .filter(([, s]) => s.min !== undefined)
       .slice(0, 5)
       .map(([col, s]) => `${col}: ${s.min}`);
-    return numCols.length > 0 ? `Minimum values: ${numCols.join(', ')}` : 'No numeric columns found.';
+    return numCols.length > 0 ? `Minimum values:\n${numCols.join('\n')}` : 'No numeric columns found.';
   }
   if (lower.includes('total') || lower.includes('sum')) {
     const numCol = columns.find(c => c.type === 'number');
@@ -253,6 +256,9 @@ function localFallbackChat(
       const total = rows.reduce((sum, row) => sum + Number(row[numCol.name] || 0), 0);
       return `Total ${numCol.name}: ${total.toLocaleString()}`;
     }
+  }
+  if (lower.includes('column')) {
+    return `The dataset has ${columns.length} columns: ${columns.map(c => c.name).join(', ')}.`;
   }
 
   return `I'm analyzing "${datasetName}" (${rowCount.toLocaleString()} rows, ${columns.length} columns, quality ${qualityScore}/100). Ask me about statistics, patterns, missing values, totals, or comparisons.`;
