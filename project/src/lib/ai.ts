@@ -49,6 +49,49 @@ SAMPLE DATA (5 rows):
 ${JSON.stringify(sample, null, 2)}`;
 }
 
+function countByValue(
+  rows: Record<string, unknown>[],
+  columns: Array<{ name: string; type: string }>,
+  question: string
+): string | null {
+  const lower = question.toLowerCase();
+  const textCols = columns.filter(c => c.type === 'string');
+
+  for (const col of textCols) {
+    const freq: Record<string, number> = {};
+    rows.forEach(r => {
+      const val = String(r[col.name] ?? '').trim().toLowerCase();
+      if (val) freq[val] = (freq[val] || 0) + 1;
+    });
+
+    const allValues = Object.keys(freq);
+    const matchedValue = allValues.find(v => lower.includes(v));
+
+    if (matchedValue) {
+      const count = freq[matchedValue];
+      return `There are ${count.toLocaleString()} transactions where ${col.name} is "${matchedValue}".`;
+    }
+  }
+
+  // If asking for breakdown of a column
+  for (const col of textCols) {
+    if (lower.includes(col.name.toLowerCase())) {
+      const freq: Record<string, number> = {};
+      rows.forEach(r => {
+        const val = String(r[col.name] ?? 'null').trim();
+        freq[val] = (freq[val] || 0) + 1;
+      });
+      const results = Object.entries(freq)
+        .sort((a, b) => b[1] - a[1])
+        .map(([val, count]) => `  ${val}: ${count.toLocaleString()}`)
+        .join('\n');
+      return `${col.name} breakdown:\n${results}`;
+    }
+  }
+
+  return null;
+}
+
 function localFallbackInsights(
   columns: Array<{ name: string; type: string }>,
   statistics: Record<string, ColumnStats>,
@@ -174,6 +217,14 @@ export async function chatWithData(
   history: Array<{ role: string; content: string }>,
   rows: Record<string, unknown>[] = []
 ): Promise<string> {
+  const lower = question.toLowerCase();
+
+  // Handle counting questions locally using full dataset
+  if (lower.includes('how many') || lower.includes('count')) {
+    const localAnswer = countByValue(rows, columns, question);
+    if (localAnswer) return localAnswer;
+  }
+
   try {
     const ctx = buildContext(datasetName, columns, statistics, rowCount, qualityScore, rows);
 
@@ -194,7 +245,8 @@ Answer concisely using actual data and statistics. Use bullet points for lists. 
 
     const text = await callGemini(prompt);
     return text || 'I could not generate a response. Please try again.';
-  } catch {
+  } catch (err) {
+    console.error('Gemini error:', err);
     return localFallbackChat(datasetName, columns, statistics, rowCount, qualityScore, question, rows);
   }
 }
@@ -219,6 +271,11 @@ function localFallbackChat(
 • Numeric columns: ${numCols.map(([col, s]) => `${col} (mean: ${s.mean})`).join(', ')}
 • Text columns: ${textCols.map(c => c.name).join(', ')}
 • Missing values: ${Object.entries(statistics).filter(([, s]) => s.nullCount > 0).map(([col, s]) => `${col}: ${s.nullCount}`).join(', ') || 'None'}`;
+  }
+
+  if (lower.includes('how many') || lower.includes('count')) {
+    const localAnswer = countByValue(rows, columns, message);
+    if (localAnswer) return localAnswer;
   }
 
   if (lower.includes('name') && (lower.includes('dataset') || lower.includes('file'))) {
