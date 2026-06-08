@@ -1,46 +1,55 @@
 import { supabase } from './supabase';
 import type { ColumnStats } from './types';
 
-const GEMINI_EDGE_FN = '/functions/v1/gemini-proxy';
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`;
 
-interface GeminiRequest {
-  type: 'insights' | 'chat' | 'recommendations';
-  datasetName?: string;
-  columns?: string[];
-  statistics?: Record<string, ColumnStats>;
-  rowCount?: number;
-  qualityScore?: number;
-  message?: string;
-  history?: Array<{ role: string; content: string }>;
+async function callGemini(prompt: string): Promise<string> {
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+  if (!apiKey) throw new Error('No Gemini API key');
+
+  const res = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+    }),
+  });
+
+  if (!res.ok) throw new Error(`Gemini error ${res.status}`);
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 }
 
-// Section 1.6/1.7: up to 20 columns, proper nullCount
-function buildDatasetContext(
+function buildContext(
   datasetName: string,
   columns: Array<{ name: string; type: string }>,
   statistics: Record<string, ColumnStats>,
   rowCount: number,
-  qualityScore: number
+  qualityScore: number,
+  rows: Record<string, unknown>[] = []
 ): string {
-  // Section 1.6: slice up to 20
-  const statsStr = Object.entries(statistics)
-    .slice(0, 20)
-    .map(([col, s]) => {
-      const colStat = s as ColumnStats;
-      return `  ${col}: mean=${colStat.mean ?? 'N/A'}, min=${colStat.min ?? 'N/A'}, max=${colStat.max ?? 'N/A'}, nulls=${colStat.nullCount ?? 0}`;
-    })
-    .join('\n');
+  const colStats = columns.slice(0, 20).map(col => {
+    const s = statistics[col.name];
+    if (!s) return `${col.name} (${col.type})`;
+    if (col.type === 'number') {
+      return `${col.name}: min=${s.min}, max=${s.max}, mean=${s.mean?.toFixed(2)}, median=${s.median}, stdDev=${s.stdDev}, nulls=${s.nullCount}`;
+    }
+    return `${col.name} (text): ${s.uniqueCount} unique values, ${s.nullCount} nulls`;
+  }).join('\n');
+
+  const sample = rows.slice(0, 20);
 
   return `Dataset: "${datasetName}"
-Rows: ${rowCount}
-Columns (${columns.length}): ${columns.map(c => `${c.name} (${c.type})`).join(', ')}
-Quality Score: ${qualityScore}/100
+Rows: ${rowCount.toLocaleString()} | Columns: ${columns.length} | Quality Score: ${qualityScore}/100
 
-Statistics:
-${statsStr}`;
+COLUMN STATISTICS:
+${colStats}
+
+SAMPLE DATA (first 20 rows):
+${JSON.stringify(sample, null, 2)}`;
 }
 
-// Local fallback AI (no API key required)
 function localFallbackInsights(
   columns: Array<{ name: string; type: string }>,
   statistics: Record<string, ColumnStats>,
@@ -94,28 +103,21 @@ function localFallbackInsights(
     });
   }
 
-  // Check for high-cardinality columns
   for (const col of textCols.slice(0, 5)) {
     const s = statistics[col.name];
     if (s && s.uniqueCount / rowCount > 0.9 && rowCount > 100) {
       insights.push({
         title: `High Cardinality: ${col.name}`,
-        description: `Column "${col.name}" has ${s.uniqueCount} unique values (${Math.round((s.uniqueCount / rowCount) * 100)}% of rows), suggesting it may be an ID column.`,
+        description: `Column "${col.name}" has ${s.uniqueCount} unique values (${Math.round((s.uniqueCount / rowCount) * 100)}% of rows).`,
         severity: 'info',
         recommendation: 'Consider excluding this column from aggregation analyses.',
       });
     }
   }
 
-  if (numericCols.length > 0) {
-    recommendations.push(`Visualize distribution of ${numericCols[0]?.name} using the Histogram chart type.`);
-  }
-  if (numericCols.length >= 2) {
-    recommendations.push(`Explore correlation between ${numericCols[0]?.name} and ${numericCols[1]?.name} using a Scatter chart.`);
-  }
-  if (textCols.length > 0) {
-    recommendations.push(`Group data by ${textCols[0]?.name} to find patterns using a Bar chart.`);
-  }
+  if (numericCols.length > 0) recommendations.push(`Visualize distribution of ${numericCols[0]?.name} using the Histogram chart type.`);
+  if (numericCols.length >= 2) recommendations.push(`Explore correlation between ${numericCols[0]?.name} and ${numericCols[1]?.name} using a Scatter chart.`);
+  if (textCols.length > 0) recommendations.push(`Group data by ${textCols[0]?.name} to find patterns using a Bar chart.`);
   recommendations.push('Export a PDF report to share findings with stakeholders.');
 
   return { insights, recommendations, summary: `Dataset analyzed: ${rowCount} rows, ${columns.length} columns, quality score ${qualityScore}/100.` };
@@ -129,33 +131,32 @@ export async function generateInsights(
   qualityScore: number
 ): Promise<object> {
   try {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) throw new Error('Not authenticated');
+    const ctx = buildContext(datasetName, columns, statistics, rowCount, qualityScore);
 
-    const ctx = buildDatasetContext(datasetName, columns, statistics, rowCount, qualityScore);
-    const payload: GeminiRequest = {
-      type: 'insights',
-      datasetName,
-      columns,
-      statistics,
-      rowCount,
-      qualityScore,
-    };
+    const prompt = `You are a senior data analyst. Analyze this dataset and respond ONLY with valid JSON — no markdown, no backticks.
 
-    const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}${GEMINI_EDGE_FN}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${session.access_token}`,
-        apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-      },
-      body: JSON.stringify({ prompt: ctx, type: 'insights', ...payload }),
-    });
+${ctx}
 
-    if (!res.ok) throw new Error('Gemini API unavailable');
-    return await res.json();
+Return this exact JSON structure:
+{
+  "insights": [
+    {
+      "title": "short title",
+      "description": "detailed description with specific numbers",
+      "severity": "info|warning|critical",
+      "recommendation": "actionable advice"
+    }
+  ],
+  "recommendations": ["recommendation 1", "recommendation 2", "recommendation 3"],
+  "summary": "2-3 sentence executive summary with specific findings"
+}
+
+Generate at least 4 insights covering: data quality, distributions, outliers, patterns, missing values.`;
+
+    const text = await callGemini(prompt);
+    const cleaned = text.replace(/```json|```/g, '').trim();
+    return JSON.parse(cleaned);
   } catch {
-    // Graceful fallback
     return localFallbackInsights(columns, statistics, rowCount, qualityScore);
   }
 }
@@ -171,181 +172,34 @@ export async function chatWithData(
   rows: Record<string, unknown>[] = []
 ): Promise<string> {
   try {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) throw new Error('Not authenticated');
+    const ctx = buildContext(datasetName, columns, statistics, rowCount, qualityScore, rows);
 
-    // Find numeric column with highest stdDev for sorting
-    const numericCols = columns.filter(c => c.type === 'number');
-    const primaryNumeric = numericCols.reduce((best, col) => {
-      const stdDev = (statistics[col.name] as ColumnStats)?.stdDev ?? 0;
-      const bestStdDev = (statistics[best?.name ?? ''] as ColumnStats)?.stdDev ?? 0;
-      return stdDev > bestStdDev ? col : best;
-    }, numericCols[0]);
+    const historyStr = history.slice(-8)
+      .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+      .join('\n');
 
-    // Sort rows by primary numeric column to get top values
-    const sortedRows = primaryNumeric && rows.length > 0
-      ? [...rows]
-          .sort((a, b) =>
-            Number(b[primaryNumeric.name] ?? 0) - Number(a[primaryNumeric.name] ?? 0)
-          )
-          .slice(0, 15)
-      : rows.slice(0, 15);
+    const prompt = `You are an expert data analyst assistant. Answer questions accurately using the actual dataset provided below.
 
-    // Build column statistics summary
-    const colStats = columns.slice(0, 20).map(col => {
-      const s = statistics[col.name] as ColumnStats;
-      if (!s) return `${col.name} (${col.type})`;
-      if (col.type === 'number') {
-        return `${col.name}: min=${s.min}, max=${s.max}, mean=${s.mean?.toFixed(2)}, nulls=${s.nullCount}`;
-      }
-      return `${col.name} (text): ${s.uniqueCount} unique values, ${s.nullCount} nulls`;
-    }).join('\n');
-const lowerQuestion = question.toLowerCase();
-
-// Count records containing a specific number
-const numberMatch = question.match(/\d+/);
-
-if (
-  lowerQuestion.includes('how many') &&
-  numberMatch
-) {
-  const target = numberMatch[0];
-
-  const count = rows.filter(row =>
-    Object.values(row).some(
-      value => String(value).trim() === target
-    )
-  ).length;
-
-  return `There are ${count} records containing the value ${target}.`;
-}
-
-// Total / Sum
-if (
-  lowerQuestion.includes('total') ||
-  lowerQuestion.includes('sum')
-) {
-  const numericColumn = columns.find(
-    c => c.type === 'number'
-  );
-
-  if (numericColumn) {
-    const total = rows.reduce(
-      (sum, row) =>
-        sum + Number(row[numericColumn.name] || 0),
-      0
-    );
-
-    return `Total ${numericColumn.name}: ${total.toLocaleString()}`;
-  }
-}
-
-// Average
-if (
-  lowerQuestion.includes('average') ||
-  lowerQuestion.includes('mean')
-) {
-  const numericColumn = columns.find(
-    c => c.type === 'number'
-  );
-
-  if (numericColumn) {
-    const total = rows.reduce(
-      (sum, row) =>
-        sum + Number(row[numericColumn.name] || 0),
-      0
-    );
-
-    const avg = total / rows.length;
-
-    return `Average ${numericColumn.name}: ${avg.toFixed(2)}`;
-  }
-}
-
-// Maximum
-if (
-  lowerQuestion.includes('highest') ||
-  lowerQuestion.includes('maximum') ||
-  lowerQuestion.includes('max')
-) {
-  const numericColumn = columns.find(
-    c => c.type === 'number'
-  );
-
-  if (numericColumn) {
-    const max = Math.max(
-      ...rows.map(r =>
-        Number(r[numericColumn.name] || 0)
-      )
-    );
-
-    return `Highest ${numericColumn.name}: ${max}`;
-  }
-}
-
-// Minimum
-if (
-  lowerQuestion.includes('lowest') ||
-  lowerQuestion.includes('minimum') ||
-  lowerQuestion.includes('min')
-) {
-  const numericColumn = columns.find(
-    c => c.type === 'number'
-  );
-
-  if (numericColumn) {
-    const min = Math.min(
-      ...rows.map(r =>
-        Number(r[numericColumn.name] || 0)
-      )
-    );
-
-    return `Lowest ${numericColumn.name}: ${min}`;
-  }
-}
-
-    const prompt = `You are a data analyst assistant for the dataset "${datasetName}".
-
-DATASET OVERVIEW:
-- Total rows: ${rowCount}
-- Total columns: ${columns.length}
-- Data quality score: ${qualityScore}/100
-
-COLUMN STATISTICS:
-${colStats}
-
-SAMPLE DATA (top 15 rows sorted by ${primaryNumeric?.name ?? 'first column'}):
-${JSON.stringify(sortedRows, null, 2)}
+${ctx}
 
 CONVERSATION HISTORY:
-${history.slice(-8).map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n')}
+${historyStr}
 
 USER QUESTION: ${question}
 
 INSTRUCTIONS:
-- Answer specifically using the actual data shown above
-- Reference specific values, names, and numbers from the sample data
-- If asked about highest/lowest/top values, look at the sorted sample data
-- If the answer requires data beyond the 15 rows shown, say so clearly
-- Keep answers concise and direct
-- Format numbers clearly
-- If asked to compare columns, use the statistics provided`;
+- Use the actual data and statistics provided — reference specific numbers and values
+- For calculations (sum, average, max, min, count), compute from the sample data shown
+- If the sample is too small to answer fully, say so and use the statistics provided
+- Be concise, specific, and helpful
+- Format numbers with commas for readability
+- Use bullet points for lists
+- If asked to compare, show a clear comparison with numbers`;
 
-    const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}${GEMINI_EDGE_FN}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${session.access_token}`,
-        apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
-      },
-      body: JSON.stringify({ type: 'chat', context: prompt, message: question, history }),
-    });
-
-    if (!res.ok) throw new Error('Gemini API unavailable');
-    const data = await res.json();
-    return data.response ?? data.message ?? 'I analyzed your dataset but could not generate a response.';
+    const text = await callGemini(prompt);
+    return text || 'I analyzed your dataset but could not generate a response.';
   } catch {
-    return localFallbackChat(datasetName, columns, statistics, rowCount, question);
+    return localFallbackChat(datasetName, columns, statistics, rowCount, question, rows);
   }
 }
 
@@ -354,7 +208,8 @@ function localFallbackChat(
   columns: Array<{ name: string; type: string }>,
   statistics: Record<string, ColumnStats>,
   rowCount: number,
-  message: string
+  message: string,
+  rows: Record<string, unknown>[] = []
 ): string {
   const lower = message.toLowerCase();
 
@@ -368,7 +223,7 @@ function localFallbackChat(
     const nullCols = Object.entries(statistics)
       .filter(([, s]) => s.nullCount > 0)
       .map(([col, s]) => `${col}: ${s.nullCount} nulls`);
-    if (nullCols.length === 0) return 'Great news — no missing values detected in this dataset!';
+    if (nullCols.length === 0) return 'No missing values detected in this dataset!';
     return `Found missing values in ${nullCols.length} column(s): ${nullCols.join(', ')}.`;
   }
   if (lower.includes('mean') || lower.includes('average')) {
@@ -376,39 +231,41 @@ function localFallbackChat(
       .filter(([, s]) => s.mean !== undefined)
       .slice(0, 5)
       .map(([col, s]) => `${col}: ${s.mean}`);
-    return numCols.length > 0
-      ? `Column means: ${numCols.join(', ')}`
-      : 'No numeric columns found for mean calculation.';
+    return numCols.length > 0 ? `Column means: ${numCols.join(', ')}` : 'No numeric columns found.';
   }
-  if (lower.includes('max') || lower.includes('maximum')) {
+  if (lower.includes('max') || lower.includes('maximum') || lower.includes('highest')) {
     const numCols = Object.entries(statistics)
       .filter(([, s]) => s.max !== undefined)
       .slice(0, 5)
       .map(([col, s]) => `${col}: ${s.max}`);
     return numCols.length > 0 ? `Maximum values: ${numCols.join(', ')}` : 'No numeric columns found.';
   }
-  if (lower.includes('min') || lower.includes('minimum')) {
+  if (lower.includes('min') || lower.includes('minimum') || lower.includes('lowest')) {
     const numCols = Object.entries(statistics)
       .filter(([, s]) => s.min !== undefined)
       .slice(0, 5)
       .map(([col, s]) => `${col}: ${s.min}`);
     return numCols.length > 0 ? `Minimum values: ${numCols.join(', ')}` : 'No numeric columns found.';
   }
+  if (lower.includes('total') || lower.includes('sum')) {
+    const numCol = columns.find(c => c.type === 'number');
+    if (numCol && rows.length > 0) {
+      const total = rows.reduce((sum, row) => sum + Number(row[numCol.name] || 0), 0);
+      return `Total ${numCol.name}: ${total.toLocaleString()}`;
+    }
+  }
 
-  return `I'm analyzing "${datasetName}" (${rowCount} rows, ${columns.length} columns). I can answer questions about statistics, missing values, column types, and data distributions. What would you like to know?`;
+  return `I'm analyzing "${datasetName}" (${rowCount.toLocaleString()} rows, ${columns.length} columns, quality ${qualityScore}/100). Ask me about statistics, patterns, missing values, totals, or comparisons.`;
 }
 
-export function getChartRecommendations(
-  columns: Array<{ name: string; type: string }>
-): string[] {
+export function getChartRecommendations(columns: Array<{ name: string; type: string }>): string[] {
   const numericCols = columns.filter(c => c.type === 'number').map(c => c.name);
   const textCols = columns.filter(c => c.type === 'string').map(c => c.name);
   const recs: string[] = [];
 
   if (numericCols.length >= 1) recs.push(`Histogram: distribution of "${numericCols[0]}"`);
   if (numericCols.length >= 2) recs.push(`Scatter: "${numericCols[0]}" vs "${numericCols[1]}"`);
-  if (textCols.length >= 1 && numericCols.length >= 1)
-    recs.push(`Bar chart: "${numericCols[0]}" by "${textCols[0]}"`);
+  if (textCols.length >= 1 && numericCols.length >= 1) recs.push(`Bar chart: "${numericCols[0]}" by "${textCols[0]}"`);
   if (textCols.length >= 1) recs.push(`Pie chart: distribution of "${textCols[0]}"`);
   if (numericCols.length >= 1) recs.push(`Line chart: trend of "${numericCols[0]}"`);
 
