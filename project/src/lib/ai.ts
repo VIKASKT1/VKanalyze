@@ -210,18 +210,33 @@ function localFallbackChat(
 ): string {
   const lower = message.toLowerCase();
 
+  if (lower.includes('summar')) {
+    const numCols = Object.entries(statistics).filter(([, s]) => s.mean !== undefined);
+    const textCols = columns.filter(c => c.type === 'string');
+    return `Dataset "${datasetName}" Summary:
+• ${rowCount.toLocaleString()} rows, ${columns.length} columns
+• Quality score: ${qualityScore}/100
+• Numeric columns: ${numCols.map(([col, s]) => `${col} (mean: ${s.mean})`).join(', ')}
+• Text columns: ${textCols.map(c => c.name).join(', ')}
+• Missing values: ${Object.entries(statistics).filter(([, s]) => s.nullCount > 0).map(([col, s]) => `${col}: ${s.nullCount}`).join(', ') || 'None'}`;
+  }
+
   if (lower.includes('name') && (lower.includes('dataset') || lower.includes('file'))) {
     return `The dataset name is "${datasetName}".`;
   }
+
   if (lower.includes('how many') && lower.includes('row')) {
     return `The dataset "${datasetName}" contains ${rowCount.toLocaleString()} rows.`;
   }
+
   if (lower.includes('how many') && lower.includes('column')) {
     return `The dataset has ${columns.length} columns: ${columns.map(c => c.name).join(', ')}.`;
   }
+
   if (lower.includes('quality')) {
     return `The data quality score is ${qualityScore}/100.`;
   }
+
   if (lower.includes('null') || lower.includes('missing')) {
     const nullCols = Object.entries(statistics)
       .filter(([, s]) => s.nullCount > 0)
@@ -229,6 +244,7 @@ function localFallbackChat(
     if (nullCols.length === 0) return 'No missing values detected in this dataset!';
     return `Found missing values in ${nullCols.length} column(s):\n${nullCols.join('\n')}`;
   }
+
   if (lower.includes('mean') || lower.includes('average')) {
     const numCols = Object.entries(statistics)
       .filter(([, s]) => s.mean !== undefined)
@@ -236,6 +252,7 @@ function localFallbackChat(
       .map(([col, s]) => `${col}: ${s.mean}`);
     return numCols.length > 0 ? `Column means:\n${numCols.join('\n')}` : 'No numeric columns found.';
   }
+
   if (lower.includes('max') || lower.includes('maximum') || lower.includes('highest')) {
     const numCols = Object.entries(statistics)
       .filter(([, s]) => s.max !== undefined)
@@ -243,6 +260,7 @@ function localFallbackChat(
       .map(([col, s]) => `${col}: ${s.max}`);
     return numCols.length > 0 ? `Maximum values:\n${numCols.join('\n')}` : 'No numeric columns found.';
   }
+
   if (lower.includes('min') || lower.includes('minimum') || lower.includes('lowest')) {
     const numCols = Object.entries(statistics)
       .filter(([, s]) => s.min !== undefined)
@@ -250,13 +268,18 @@ function localFallbackChat(
       .map(([col, s]) => `${col}: ${s.min}`);
     return numCols.length > 0 ? `Minimum values:\n${numCols.join('\n')}` : 'No numeric columns found.';
   }
+
   if (lower.includes('total') || lower.includes('sum')) {
     const numCol = columns.find(c => c.type === 'number');
     if (numCol && rows.length > 0) {
-      const total = rows.reduce((sum, row) => sum + Number(row[numCol.name] || 0), 0);
+      const total = rows.reduce((sum, row) => {
+        const n = parseFloat(String(row[numCol.name]).replace(/[^0-9.-]/g, ''));
+        return sum + (isNaN(n) ? 0 : n);
+      }, 0);
       return `Total ${numCol.name}: ${total.toLocaleString()}`;
     }
   }
+
   if (lower.includes('column')) {
     return `The dataset has ${columns.length} columns: ${columns.map(c => c.name).join(', ')}.`;
   }
