@@ -133,6 +133,7 @@ export function applyCleaningRules(
   for (const rule of rules) {
     if (!rule.enabled) continue;
     switch (rule.type) {
+
       case 'remove_duplicates': {
         const before = result.length;
         const seen = new Set<string>();
@@ -145,6 +146,7 @@ export function applyCleaningRules(
         changes.push(`Removed ${before - result.length} duplicate rows`);
         break;
       }
+
       case 'remove_nulls': {
         const col = rule.column;
         if (col) {
@@ -154,6 +156,7 @@ export function applyCleaningRules(
         }
         break;
       }
+
       case 'fill_mean': {
         const col = rule.column;
         if (col) {
@@ -172,7 +175,6 @@ export function applyCleaningRules(
               filled++;
               return { ...r, [col]: roundedMean };
             }
-            // Also clean currency symbols from existing values
             if (typeof r[col] === 'string' && isNaN(Number(r[col]))) {
               const cleaned = toNum(r[col]);
               return { ...r, [col]: isNaN(cleaned) ? r[col] : cleaned };
@@ -183,6 +185,7 @@ export function applyCleaningRules(
         }
         break;
       }
+
       case 'fill_median': {
         const col = rule.column;
         if (col) {
@@ -212,6 +215,7 @@ export function applyCleaningRules(
         }
         break;
       }
+
       case 'trim_whitespace': {
         let trimmed = 0;
         result = result.map(r => {
@@ -227,6 +231,7 @@ export function applyCleaningRules(
         if (trimmed > 0) changes.push(`Trimmed whitespace in ${trimmed} cells`);
         break;
       }
+
       case 'standardize_case': {
         const col = rule.column;
         if (col) {
@@ -238,6 +243,86 @@ export function applyCleaningRules(
         }
         break;
       }
+
+      case 'replace_na': {
+        const naValues = new Set(['n/a', 'na', 'n.a', 'none', 'nil', '-', '--', 'not available', 'not applicable']);
+        let replaced = 0;
+        result = result.map(r => {
+          const newRow = { ...r };
+          for (const col of columns) {
+            if (typeof newRow[col] === 'string' && naValues.has((newRow[col] as string).trim().toLowerCase())) {
+              newRow[col] = null;
+              replaced++;
+            }
+          }
+          return newRow;
+        });
+        changes.push(`Replaced ${replaced} N/A values with null`);
+        break;
+      }
+
+      case 'title_case_all': {
+        let converted = 0;
+        result = result.map(r => {
+          const newRow = { ...r };
+          for (const col of columns) {
+            if (typeof newRow[col] === 'string') {
+              const titled = (newRow[col] as string)
+                .trim()
+                .toLowerCase()
+                .replace(/\b\w/g, l => l.toUpperCase());
+              if (titled !== newRow[col]) {
+                newRow[col] = titled;
+                converted++;
+              }
+            }
+          }
+          return newRow;
+        });
+        changes.push(`Converted ${converted} cells to Title Case`);
+        break;
+      }
+
+      case 'standardize_dates': {
+        let converted = 0;
+        result = result.map(r => {
+          const newRow = { ...r };
+          for (const col of columns) {
+            const val = String(newRow[col] ?? '').trim();
+            if (!val || val === 'null' || val === 'undefined') continue;
+
+            let date: Date | null = null;
+
+            // DD-MM-YYYY or DD/MM/YYYY
+            const dmy = val.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+            if (dmy) {
+              date = new Date(`${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`);
+            }
+
+            // MM/DD/YYYY
+            const mdy = val.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+            if (!date && mdy) {
+              date = new Date(`${mdy[3]}-${mdy[1].padStart(2, '0')}-${mdy[2].padStart(2, '0')}`);
+            }
+
+            // Already YYYY-MM-DD — skip
+            const ymd = val.match(/^\d{4}-\d{2}-\d{2}$/);
+            if (!date && ymd) continue;
+
+            if (date && !isNaN(date.getTime())) {
+              const formatted = date.toISOString().split('T')[0];
+              if (formatted !== val) {
+                newRow[col] = formatted;
+                converted++;
+              }
+            }
+          }
+          return newRow;
+        });
+        changes.push(`Standardized ${converted} date values to YYYY-MM-DD`);
+        break;
+      }
+
     }
   }
   return { rows: result, changes };
