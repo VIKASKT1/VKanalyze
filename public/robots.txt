@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://vkanalyze.netlify.app/sitemap.xml
+Sitemap: https://vkanalyze-chi.vercel.app/sitemap.xml
