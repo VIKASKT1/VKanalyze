@@ -183,5 +183,5 @@ END $$;
 
 -- Insert admin role for Vikas
 INSERT INTO user_roles (user_id, role)
-SELECT id, 'admin' FROM auth.users WHERE email = 'vikasvikki010@gmail.com'
+SELECT id, 'admin' FROM auth.users WHERE email = 'your email'
 ON CONFLICT (user_id) DO UPDATE SET role = 'admin';
