@@ -75,6 +75,42 @@ function getGeminiKeys(): string[] {
   return keys;
 }
 
+// Determines whether a failure should trigger failover to the next key,
+// based on HTTP status AND the response body content (some Gemini errors
+// return non-429 statuses but still indicate a quota/rate issue in the body).
+function isFailoverEligible(status: number, bodyText: string): boolean {
+  if (status === 429) return true;
+  const normalized = bodyText.toLowerCase();
+  return (
+    normalized.includes("resource_exhausted") ||
+    normalized.includes("quota_exceeded") ||
+    normalized.includes("quota exceeded") ||
+    normalized.includes("rate limit") ||
+    normalized.includes("rate_limit")
+  );
+}
+// Determines whether a failure should trigger failover to the next key,
+// based on HTTP status AND the response body content (some Gemini errors
+// return non-429 statuses but still indicate a quota/rate issue in the body).
+function isFailoverEligible(status: number, bodyText: string): boolean {
+  if (status === 429) return true;
+  const normalized = bodyText.toLowerCase();
+  return (
+    normalized.includes("resource_exhausted") ||
+    normalized.includes("quota_exceeded") ||
+    normalized.includes("quota exceeded") ||
+    normalized.includes("rate limit") ||
+    normalized.includes("rate_limit")
+  );
+}
+
+function classifyErrorType(status: number, bodyText: string): string {
+  const normalized = bodyText.toLowerCase();
+  if (status === 429 || normalized.includes("resource_exhausted")) return "quota_exceeded";
+  if (normalized.includes("rate limit") || normalized.includes("rate_limit")) return "rate_limited";
+  return `http_${status}`;
+}
+
 async function callGeminiWithFailover(
   contents: Array<{ role: string; parts: Array<{ text: string }> }>,
   temperature = 0.3,
@@ -82,10 +118,23 @@ async function callGeminiWithFailover(
   requestType = "chat"
 ): Promise<{ text: string; keySlot: number; error?: string }> {
   const keys = getGeminiKeys();
-  if (keys.length === 0) return { text: "", keySlot: 0, error: "no_keys" };
 
+  console.log(`Loaded Gemini keys: ${keys.length}`);
+
+  if (keys.length === 0) {
+    console.error("No Gemini API keys configured (GEMINI_API_KEY / GEMINI_API_KEY_2 / GEMINI_API_KEY_3)");
+    return { text: "", keySlot: 0, error: "no_keys" };
+  }
+
+  let lastError = "unknown_error";
+
+  // Never let a single key's failure (network error, bad status, parse error,
+  // etc.) stop the loop. Every key gets a full attempt before we give up.
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
+    const slot = i + 1;
+    console.log(`Trying Gemini key slot ${slot}`);
+
     try {
       const res = await fetch(`${GEMINI_URL}?key=${key}`, {
         method: "POST",
@@ -95,26 +144,55 @@ async function callGeminiWithFailover(
 
       if (!res.ok) {
         const errText = await res.text();
-        console.error(`Gemini key slot ${i + 1} error ${res.status}:`, errText);
-        await trackKeyUsage(i + 1, requestType, false,
-          res.status === 429 ? "quota_exceeded" : `http_${res.status}`
-        );
-        if (res.status === 429 && i < keys.length - 1) continue;
-        throw new Error(`Gemini API error: ${res.status}`);
+        const errorType = classifyErrorType(res.status, errText);
+
+        console.error(`Key slot ${slot} failed (${res.status} ${errorType})`);
+        await trackKeyUsage(slot, requestType, false, errorType);
+
+        lastError = `Gemini API error: ${res.status} (${errorType})`;
+
+        if (isFailoverEligible(res.status, errText)) {
+          if (i < keys.length - 1) {
+            // More keys available — move on to the next one.
+            continue;
+          } else {
+            // This was the last key — fall through to return the error below.
+            console.error("All Gemini keys exhausted after quota/rate-limit failures.");
+            break;
+          }
+        }
+// Non-failover-eligible error (e.g. 400 bad request, 401 unauthorized
+        // for this specific key). Still try remaining keys rather than
+        // throwing immediately, in case it's a key-specific credential issue.
+        if (i < keys.length - 1) {
+          continue;
+        } else {
+          break;
+        }
       }
 
+      // Success
       const data = await res.json();
       const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-      await trackKeyUsage(i + 1, requestType, true);
-      return { text, keySlot: i + 1 };
+      console.log(`Key slot ${slot} succeeded`);
+      await trackKeyUsage(slot, requestType, true);
+      return { text, keySlot: slot };
     } catch (err) {
-      console.error(`Key slot ${i + 1} failed:`, err);
-      if (i === keys.length - 1) {
-        return { text: "", keySlot: i + 1, error: err instanceof Error ? err.message : "unknown" };
+      // Network-level failure, timeout, JSON parse error, etc.
+      const message = err instanceof Error ? err.message : "unknown";
+      console.error(`Key slot ${slot} threw an exception: ${message}`);
+      await trackKeyUsage(slot, requestType, false, "exception");
+      lastError = message;
+
+      if (i < keys.length - 1) {
+        continue;
       }
+      // last key, exception occurred — fall through to return error below
     }
   }
-  return { text: "", keySlot: 0, error: "all_keys_failed" };
+
+  console.error(`All ${keys.length} Gemini key(s) failed. Last error: ${lastError}`);
+  return { text: "", keySlot: keys.length, error: lastError };
 }
 
 async function trackKeyUsage(keySlot: number, requestType: string, success: boolean, errorType?: string) {
@@ -150,8 +228,7 @@ Deno.serve(async (req: Request) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
-
-  const jwt = authHeader.replace("Bearer ", "").trim();
+const jwt = authHeader.replace("Bearer ", "").trim();
   let authenticatedUserId = "";
 
   try {
@@ -218,6 +295,7 @@ Deno.serve(async (req: Request) => {
 
     // ── Fallback when no API keys configured ─────────────────────────────
     if (keys.length === 0) {
+      console.error("gemini-proxy: no Gemini keys configured, using static fallback responses");
       if (type === "chat" || type === "sql_gen") {
         return new Response(
           JSON.stringify({
@@ -275,10 +353,11 @@ Deno.serve(async (req: Request) => {
       temperature = 0.7;
     }
 
-    // ── Call Gemini ───────────────────────────────────────────────────────
+    // ── Call Gemini (with automatic multi-key failover) ───────────────────
     const { text, error: callError } = await callGeminiWithFailover(contents, temperature, 2048, type);
 
     if (callError) {
+      console.error(`gemini-proxy: all keys failed for type="${type}", serving fallback response. Reason: ${callError}`);
       if (type === "chat") return new Response(JSON.stringify({ response: buildFallbackChatResponse(datasetName ?? "dataset", columns ?? [], statistics ?? {}, rowCount ?? 0, message ?? "") }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       if (type === "sql_gen" || type === "sql") return new Response(JSON.stringify({ response: buildFallbackSQL(message ?? "", (columns ?? []) as string[]) }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       return new Response(JSON.stringify(buildFallbackInsights(columns ?? [], statistics ?? {}, rowCount ?? 0, qualityScore ?? 0)), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -305,7 +384,6 @@ Deno.serve(async (req: Request) => {
     });
   }
 });
-
 // ── Fallback generators ────────────────────────────────────────────────────────
 function buildFallbackSQL(question: string, columns: string[]): string {
   const lower = question.toLowerCase();
